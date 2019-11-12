@@ -1,0 +1,395 @@
+--Use Role SYSADMIN for creating Database objects
+
+--Create Database
+CREATE DATABASE IF NOT EXISTS Citibike;
+
+-- This SQL file is for the Hands On Lab Guide for the 30-day free Snowflake trial account
+-- The numbers below correspond to the sections of the Lab Guide in which SQL is to be run in a Snowflake worksheet
+-- Modules 1 and 2 of the Lab Guide have no SQL to be run
+
+
+/* *********************************************************************************** */
+/* *** MODULE 3  ********************************************************************* */
+/* *********************************************************************************** */
+
+-- 3.1.4
+
+--Create Table
+create or replace table trips
+(tripduration integer,
+  starttime timestamp,
+  stoptime timestamp,
+  start_station_id integer,
+  start_station_name string,
+  start_station_latitude float,
+  start_station_longitude float,
+  end_station_id integer,
+  end_station_name string,
+  end_station_latitude float,
+  end_station_longitude float,
+  bikeid integer,
+  membership_type string,
+  usertype string,
+  birth_year integer,
+  gender integer);
+
+
+show databases;
+
+show schemas;
+
+show tables;
+
+
+--Create Stage
+CREATE STAGE "CITIBIKE"."PUBLIC".citibike_trips URL = 's3://snowflake-workshop-lab/citibike-trips';
+
+show stages;
+
+list @CITIBIKE_TRIPS;
+
+--Create File format
+CREATE FILE FORMAT "CITIBIKE"."PUBLIC".CSV TYPE = 'CSV' COMPRESSION = 'AUTO' FIELD_DELIMITER = ',' RECORD_DELIMITER = '\n'
+SKIP_HEADER = 1 FIELD_OPTIONALLY_ENCLOSED_BY = '\042' TRIM_SPACE = FALSE ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
+ESCAPE = 'NONE' ESCAPE_UNENCLOSED_FIELD = '\134' DATE_FORMAT = 'AUTO' TIMESTAMP_FORMAT = 'AUTO' NULL_IF = ('');
+
+--Data Load stats:-
+--On AWS S3, the data represents 61.5M rows, 376 objects, and 1.9GB total size compressed.
+
+--Create Warehouse/Alter Warehouse
+--Go and create a warehouse name - COMPUTE_WH
+
+--Load Data into trips table from S3 bucket
+copy into trips from @CITIBIKE_TRIPS file_format=CSV;
+
+--Let's re-run it again the same copy command above.
+copy into trips from @CITIBIKE_TRIPS file_format=CSV;
+
+select count(*) from trips;
+--61467983
+
+
+--truncate and load the table
+truncate table trips;
+
+
+--validation mode
+copy into trips from @CITIBIKE_TRIPS file_format=CSV
+on_error='skip_file'
+--ON_ERROR = { CONTINUE | SKIP_FILE | SKIP_FILE_<num> | SKIP_FILE_<num>% | ABORT_STATEMENT }
+validation_mode=RETURN_100_ROWS;
+
+
+--ALTER WAREHOUSE
+ALTER WAREHOUSE "COMPUTE_WH" SET WAREHOUSE_SIZE = 'LARGE' AUTO_SUSPEND = 600 AUTO_RESUME = TRUE MIN_CLUSTER_COUNT = 1 MAX_CLUSTER_COUNT = 1 SCALING_POLICY = 'STANDARD' COMMENT = '';
+
+
+copy into trips from @CITIBIKE_TRIPS file_format=CSV;
+--ON_ERROR = { CONTINUE | SKIP_FILE | SKIP_FILE_<num> | SKIP_FILE_<num>% | ABORT_STATEMENT }
+
+
+--select only few columns
+copy into trips (TRIPDURATION,START_STATION_ID)
+from (
+Select T.$1, T.$4
+ FROM @CITIBIKE_TRIPS as T) FILE_FORMAT='CSV';
+
+
+
+--Data loading depends on
+-- Warehouse size you have use
+-- Data you have. Number of files you have and size of files.
+
+
+
+--Example in Fact and Dimensions load
+
+
+-----------Running Analytics Query
+
+--Create a new warehouse ANALYTICS_WH with Large size
+
+CREATE WAREHOUSE ANALYTICS_WH WITH WAREHOUSE_SIZE = 'LARGE' WAREHOUSE_TYPE = 'STANDARD'
+AUTO_SUSPEND = 600 AUTO_RESUME = TRUE MIN_CLUSTER_COUNT = 1 MAX_CLUSTER_COUNT = 2 SCALING_POLICY = 'STANDARD';
+
+USE ROLE SYSADMIN;
+USE WAREHOUSE ANALYTICS_WH;
+USE DATABASE CITIBIKE;
+USE SCHEMA PUBLIC;
+
+select * from trips limit 20;
+
+--Run some SQL queries using Analytics WH
+--It will show for each hour the number of trips, average trip duration, and average trip distance.
+select date_trunc('hour', starttime) as "date",
+count(*) as "num trips",
+avg(tripduration)/60 as "avg duration (mins)",
+avg(haversine(start_station_latitude, start_station_longitude, end_station_latitude,end_station_longitude)) as "avg distance (km)"
+from trips
+group by 1
+order by 1 desc;
+
+--Let's try with different warehouse and see the result cache
+USE WAREHOUSE COMPUTE_WH;
+USE DATABASE CITIBIKE;
+USE SCHEMA PUBLIC;
+
+select date_trunc('hour', starttime) as "date",
+count(*) as "num trips",
+avg(tripduration)/60 as "avg duration (mins)",
+avg(haversine(start_station_latitude, start_station_longitude, end_station_latitude,end_station_longitude)) as "avg distance (km)"
+from trips
+group by 1
+order by 1 desc;
+
+
+ALTER SESSION SET USE_CACHED_RESULT = FALSE;
+--ALTER SESSION SET USE_CACHED_RESULT = TRUE;
+
+
+USE WAREHOUSE ANALYTICS_WH;
+--which days of the week are the busiest:
+select
+ dayname(starttime) as "day of week",
+ count(*) as "num trips"
+from trips
+group by 1 order by 2 desc;
+
+---Use case of Zero copy cloning
+--Cloning
+
+create table trips_dev clone trips;
+
+--need to tell more about cloing and it's features
+
+--Zero copy cloning
+--cloned table
+
+select count(*) from trips;
+
+select count(*) from trips_dev;
+
+
+--original table
+select * from trips where BIKEID=22285;
+
+--cloned table
+select * from trips_dev where BIKEID=22285;
+
+
+
+--Update the cloned table(UAT data)
+update trips_dev set MEMBERSHIP_TYPE='Member' where BIKEID=22285;
+
+
+--truncate the original table
+truncate table trips;
+
+--load data from clone to trips
+create or replace table trips as select * from trips_dev;
+
+--Update the Original table(Prod data)
+update trips set MEMBERSHIP_TYPE=NULL where BIKEID=22285;
+
+
+
+--drop the cloned table
+drop table trips_dev;
+
+----------------------------------------------------------------------------------------------------
+--Loading JSON data
+--Weather data of New York City from 2016-07-05 to 2019-06-25. It is also staged on AWS S3 where the
+--data represents 57.9k rows, 61 objects, and 2.5MB total size compressed.
+
+
+--Create database
+create database weather;
+
+
+use role sysadmin;
+use warehouse compute_wh;
+use database weather;
+use schema public;
+
+--create json table
+--create table for json data
+create table json_weather_data (v variant);
+
+--create external stage s3
+create stage nyc_weather url = 's3://snowflake-workshop-lab/weather-nyc';
+
+
+list @nyc_weather;
+
+
+--load data
+copy into json_weather_data from @nyc_weather file_format=(type=json);
+
+
+--read json data
+select * from json_weather_data limit 10;
+
+--Creating Views
+create view json_weather_data_view as
+select
+ v:time::timestamp as observation_time,
+ v:city.id::int as city_id,
+ v:city.name::string as city_name,
+ v:city.country::string as country,
+ v:city.coord.lat::float as city_lat,
+ v:city.coord.lon::float as city_lon,
+ v:clouds.all::int as clouds,
+ (v:main.temp::float)-273.15 as temp_avg,
+ (v:main.temp_min::float)-273.15 as temp_min,
+ (v:main.temp_max::float)-273.15 as temp_max,
+ v:weather[0].main::string as weather,
+ v:weather[0].description::string as weather_desc,
+ v:weather[0].icon::string as weather_icon,
+ v:wind.deg::float as wind_dir,
+ v:wind.speed::float as wind_speed
+from json_weather_data
+where city_id = 5128638;
+
+select * from json_weather_data_view limit 20;
+
+--show view DDL in snowflake
+
+select * from json_weather_data_view
+where date_trunc('month',observation_time) = '2018-01-01'
+limit 20;
+
+--Show join operations cross DB joins
+--Citibike data and Weather DB
+
+select weather as conditions
+ ,count(*) as num_trips
+from citibike.public.trips
+left outer join json_weather_data_view
+ on date_trunc('hour', observation_time) = date_trunc('hour', starttime)
+where conditions is not null
+group by 1 order by 2 desc;
+
+
+
+--Using Time Travel
+
+
+--Drop and Undrop a table
+drop table json_weather_data;
+
+undrop table json_weather_data;
+
+--Undrop Dbs, Schemas, tables work
+
+--Rollback a table
+use role sysadmin;
+use warehouse compute_wh;
+use database citibike;
+use schema public;
+
+--Update entire 1.6 GB table with 61.5 M rows
+update trips set start_station_name = 'oops';
+
+--01902c7a-01e2-d92f-0000-faf90001454e
+
+select start_station_name as "station", count(*) as "rides" from trips
+group by 1 order by 2 desc limit 20;
+
+
+--Alternate way to retreive query id
+set query_id=
+(select query_id from table(information_schema.query_history_by_session (result_limit=>20)) where query_text like 'update%' order by start_time limit 1);
+
+--print query Id
+select $query_id;
+
+create or replace table trips as
+select * from trips before(statement => $query_id);
+
+--OR
+create or replace table trips as
+select * from trips before(statement => '019013ca-01d1-63c8-0000-0000faf9ab35');
+
+
+select start_station_name as "station", count(*) as "rides" from trips
+group by 1 order by 2 desc limit 20;
+
+
+
+--The standard retention period is 1 day (24 hours) and is automatically enabled for all Snowflake accounts:
+
+--For Snowflake Standard Edition, the retention period can be set to 0 (or unset back to the default of 1 day) at the account and object level (i.e. databases, schemas, and tables).
+
+--For Snowflake Enterprise Edition (and higher):
+
+--For transient databases, schemas, and tables, the retention period can be set to 0 (or unset back to the default of 1 day). The same is also true for temporary tables.
+
+--For permanent databases, schemas, and tables, the retention period can be set to any value from 0 up to 90 days.
+
+
+--create table mytable(col1 number, col2 date) data_retention_time_in_days=90;
+
+--alter table mytable set data_retention_time_in_days=30;
+--you can set this parameter at DB, Schema or table level
+
+-- You can set this to 0 as well. General rule atleast 1 day.
+
+
+
+--The following query selects historical data from a table as of 5 minutes ago:
+create or replace table trips as
+select * from trips at(offset => -5) limit 200;
+
+
+select * from trips limit 200;
+--The following query selects historical data from a table up to, but not including any changes made by the specified statement:
+
+
+
+--With Data Sharing –
+
+
+--Note - Data Sharing currently only supported between accounts in the same Snowflake Provider and Region
+
+
+
+--Data Share:-
+--TRIPS_SHARE (https://ve39389.us-east-1.snowflakecomputing.com) (Reader account)
+
+
+
+--Create Role Based Access Controls
+use role accountadmin;
+
+--create new role for junior dba
+create role junior_dba;
+
+--grant priviliges
+grant role junior_dba to user zayd0718;
+
+
+--Switch to new role junior_dba and check access
+
+--grant access to new role junior_dba
+use role accountadmin;
+grant usage on database citibike to role junior_dba;
+grant usage on database weather to role junior_dba;
+
+use role junior_dba;
+--Now you can view the data
+
+
+/*
+use role accountadmin;
+use warehouse compute_wh;
+use database weather;
+use schema public;
+
+
+
+drop share if exists trips_share;
+drop database if exists citibike;
+drop database if exists weather;
+drop warehouse if exists analytics_wh;
+drop role if exists junior_dba;
+*/
